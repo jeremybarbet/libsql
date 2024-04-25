@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use libsql_sys::wal::wrapper::{WrapWal, WrappedWal};
-use libsql_sys::wal::{BusyHandler, CheckpointCallback, Sqlite3WalManager, Wal, WalManager};
+use libsql_sys::wal::{BusyHandler, CheckpointCallback, Wal, WalManager};
 use libsql_sys::EncryptionConfig;
 use metrics::histogram;
 use parking_lot::Mutex;
@@ -25,7 +25,7 @@ use crate::stats::{Stats, StatsUpdateMessage};
 use crate::{Result, BLOCKING_RT};
 
 use super::connection_manager::{
-    ConnectionManager, ManagedConnectionWal, ManagedConnectionWalWrapper,
+    ConnectionManager, ManagedConnectionWal, ManagedConnectionWalWrapper, InnerWalManager,
 };
 use super::program::{
     check_describe_auth, check_program_auth, DescribeCol, DescribeParam, DescribeResponse, Vm,
@@ -48,6 +48,7 @@ pub struct MakeLibSqlConn<W> {
     encryption_config: Option<EncryptionConfig>,
     block_writes: Arc<AtomicBool>,
     resolve_attach_path: ResolveNamespacePathFn,
+    make_wal_manager: Arc<dyn Fn() -> InnerWalManager + Sync + Send + 'static>,
 }
 
 impl<W> MakeLibSqlConn<W>
@@ -68,6 +69,7 @@ where
         encryption_config: Option<EncryptionConfig>,
         block_writes: Arc<AtomicBool>,
         resolve_attach_path: ResolveNamespacePathFn,
+        make_wal_manager: Arc<dyn Fn() -> InnerWalManager + Sync + Send + 'static>,
     ) -> Result<Self> {
         let mut this = Self {
             db_path,
@@ -84,6 +86,7 @@ where
             block_writes,
             resolve_attach_path,
             connection_manager: ConnectionManager::default(),
+            make_wal_manager,
         };
 
         let db = this.try_create_db().await?;
@@ -138,6 +141,7 @@ where
             self.block_writes.clone(),
             self.resolve_attach_path.clone(),
             self.connection_manager.clone(),
+            self.make_wal_manager.clone(),
         )
         .await
     }
@@ -162,6 +166,9 @@ pub struct LibSqlConnection<T> {
 #[cfg(test)]
 impl LibSqlConnection<libsql_sys::wal::wrapper::PassthroughWalWrapper> {
     pub async fn new_test(path: &Path) -> Self {
+        use libsql_sys::wal::either::Either;
+        use libsql_sys::wal::Sqlite3WalManager;
+
         Self::new(
             path.to_owned(),
             Arc::new([]),
@@ -173,6 +180,7 @@ impl LibSqlConnection<libsql_sys::wal::wrapper::PassthroughWalWrapper> {
             Default::default(),
             Arc::new(|_| unreachable!()),
             ConnectionManager::default(),
+            Arc::new(|| Either::Left(Sqlite3WalManager::default())),
         )
         .await
         .unwrap()
@@ -307,13 +315,14 @@ where
         block_writes: Arc<AtomicBool>,
         resolve_attach_path: ResolveNamespacePathFn,
         connection_manager: ConnectionManager,
+        make_wal: Arc<dyn Fn() -> InnerWalManager + Sync + Send + 'static>,
     ) -> crate::Result<Self> {
         let (conn, id) = tokio::task::spawn_blocking({
             let connection_manager = connection_manager.clone();
             move || -> crate::Result<_> {
                 let manager = ManagedConnectionWalWrapper::new(connection_manager);
                 let id = manager.id();
-                let wal = Sqlite3WalManager::default().wrap(manager).wrap(wal_wrapper);
+                let wal = make_wal().wrap(manager).wrap(wal_wrapper);
 
                 let conn = Connection::new(
                     path.as_ref(),
@@ -674,8 +683,9 @@ where
 #[cfg(test)]
 mod test {
     use itertools::Itertools;
+    use libsql_sys::wal::either::Either;
     use libsql_sys::wal::wrapper::PassthroughWalWrapper;
-    use libsql_sys::wal::Sqlite3Wal;
+    use libsql_sys::wal::{Sqlite3Wal, Sqlite3WalManager};
     use rand::Rng;
     use tempfile::tempdir;
     use tokio::task::JoinSet;
@@ -737,6 +747,7 @@ mod test {
             None,
             Default::default(),
             Arc::new(|_| unreachable!()),
+            Arc::new(|| Either::Left(Sqlite3WalManager::default())),
         )
         .await
         .unwrap();
@@ -781,6 +792,7 @@ mod test {
             None,
             Default::default(),
             Arc::new(|_| unreachable!()),
+            Arc::new(|| Either::Left(Sqlite3WalManager::default())),
         )
         .await
         .unwrap();
@@ -830,6 +842,7 @@ mod test {
             None,
             Default::default(),
             Arc::new(|_| unreachable!()),
+            Arc::new(|| Either::Left(Sqlite3WalManager::default())),
         )
         .await
         .unwrap();
@@ -911,6 +924,7 @@ mod test {
             None,
             Default::default(),
             Arc::new(|_| unreachable!()),
+            Arc::new(|| Either::Left(Sqlite3WalManager::default())),
         )
         .await
         .unwrap();
@@ -996,6 +1010,7 @@ mod test {
             None,
             Default::default(),
             Arc::new(|_| unreachable!()),
+            Arc::new(|| Either::Left(Sqlite3WalManager::default())),
         )
         .await
         .unwrap();

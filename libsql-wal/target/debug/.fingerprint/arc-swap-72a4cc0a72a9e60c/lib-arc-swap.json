@@ -1,0 +1,1 @@
+{"rustc":12152928357286724068,"features":"[]","target":10971961334288609536,"profile":3797293754785534760,"path":11697176464461875189,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"debug/.fingerprint/arc-swap-72a4cc0a72a9e60c/dep-lib-arc-swap"}}],"rustflags":["--cfg","tokio_unstable"],"metadata":5403683474337919509,"config":2202906307356721367,"compile_kind":0}
