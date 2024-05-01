@@ -161,11 +161,73 @@ impl Connection {
         Ok(())
     }
 
+    fn execute_transactional_batch_inner<S>(&self, sql: S) -> Result<()>
+        where
+            S: Into<String>,
+    {
+        let sql = sql.into();
+        let mut sql = sql.as_str();
+        let mut open_transactions = 0;
+        while !sql.is_empty() {
+            let stmt = self.prepare(sql)?;
+
+            let tail = stmt.tail();
+            let stmt_sql = if tail == 0 || tail >= sql.len() {
+                sql
+            } else {
+                &sql[..tail]
+            };
+            let prefix_count = stmt_sql
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .count();
+            let stmt_sql = &stmt_sql[prefix_count..];
+            if stmt_sql.starts_with("BEGIN") {
+                open_transactions += 1;
+            } else if stmt_sql.starts_with("COMMIT") || stmt_sql.starts_with("ROLLBACK") || stmt_sql.starts_with("END") {
+                open_transactions -= 1;
+                if open_transactions < 0 {
+                    return Err(Error::TransactionalBatchError("Unmatched COMMIT/ROLLBACK/END".to_string()));
+                }
+            }
+
+            if !stmt.inner.raw_stmt.is_null() {
+                stmt.step()?;
+            }
+
+            if tail == 0 || tail >= sql.len() {
+                break;
+            }
+
+            sql = &sql[tail..];
+        }
+        if open_transactions != 0 {
+            while open_transactions > 0 {
+                self.execute("ROLLBACK", Params::None)?;
+                open_transactions -= 1;
+            }
+            return Err(Error::TransactionalBatchError("Unclosed transaction(s)".to_string()));
+        }
+
+        Ok(())
+    }
+
     pub fn execute_transactional_batch<S>(&self, sql: S) -> Result<()>
     where
         S: Into<String>,
     {
-        todo!("haaawk")
+        self.execute("BEGIN TRANSACTION", Params::None)?;
+
+        match self.execute_transactional_batch_inner(sql) {
+            Ok(_) => {
+                self.execute("COMMIT", Params::None)?;
+                Ok(())
+            }
+            Err(e) => {
+                self.execute("ROLLBACK", Params::None)?;
+                Err(e)
+            }
+        }
     }
 
     /// Execute the SQL statement synchronously.
