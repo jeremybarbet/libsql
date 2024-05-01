@@ -7,7 +7,7 @@ use crate::hrana::{bind_params, unwrap_err, HranaError, HttpSend, Result};
 use crate::params::Params;
 use crate::transaction::Tx;
 use crate::util::ConnectorService;
-use crate::{Rows, Statement};
+use crate::{Error, Rows, Statement};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::{Stream, TryStreamExt};
@@ -278,7 +278,25 @@ impl Conn for HranaStream<HttpSender> {
     }
 
     async fn execute_transactional_batch(&self, sql: &str) -> crate::Result<()> {
-        todo!("haaawk")
+        let mut stmts = Vec::new();
+        let parse = crate::parser::Statement::parse(sql);
+        let mut c = TxScopeCounter::default();
+        for s in parse {
+            let s = s?;
+            c.count(s.kind);
+            if c.end_tx() {
+                return Err(Error::TransactionalBatchError("Unmatched COMMIT/ROLLBACK/END".to_string()));
+            }
+            stmts.push(Stmt::new(s.stmt, false));
+        }
+        if c.begin_tx() {
+            return Err(Error::TransactionalBatchError("Unclosed transaction(s)".to_string()));
+        }
+        let res = self
+            .batch_inner(Batch::transactional(stmts), true)
+            .await
+            .map_err(|e| crate::Error::Hrana(e.into()))?;
+        unwrap_err(res)
     }
 
     async fn prepare(&self, sql: &str) -> crate::Result<Statement> {
